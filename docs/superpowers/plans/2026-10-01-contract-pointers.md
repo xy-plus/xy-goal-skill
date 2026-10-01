@@ -34,7 +34,15 @@ spec：`docs/superpowers/specs/2026-10-01-contract-pointers-design.md`（同树�
   grep -q '\[~\] ID' $f               # D4
   grep -q '按出处' $f                 # D6、D7：读条目与验收都按出处找齐要求
   grep -q '定时器文案在建时冻结' $f   # D6
+  ! grep -q '只在完整清理时' $f       # D2：旧限制句删了
+  grep -q '当场' $f                   # D2：改口当场改
+  grep -q '下一次送验' $f             # D2：存档、下次送验核对
+  grep -q '300 字' $f                 # D1
+  grep -q '设计内容不进契约' $f       # D1
+  grep -q '；规矩：' $f               # D3：并写格式
+  [ "$(grep -c '找齐' $f)" -ge 2 ]    # D6 与 D7 两处都在
   ```
+  后 7 行由计划审查补上（前 8 行全绿不等于 D1～D8 都落了），15 行合起来是 C1 的证据。
   在 `ce9cfe6` 上跑，确认前两行之外全红（前两行在旧文件上就红，是因为旧字还在）。
 - [ ] **Step 2：改文**，逐条落 spec 的 D1～D8：
   - 模板：条目四行（标题、`判据：`、`出处：`、`产物：`），写明 300 字为度、设计内容不进契约、出处要指向能活到验收的东西；`[~]` 一行格式。
@@ -53,10 +61,13 @@ spec：`docs/superpowers/specs/2026-10-01-contract-pointers-design.md`（同树�
 
 - [ ] **Step 1：** 按新规矩做一遍完整清理：先存原文 `archive/<契约名>.before-criteria-<YYYYMMDD-HHMM>.md`；草稿写 `archive/<契约名>.criteria-draft-<YYYYMMDD-HHMM>.md`：条目改成四行格式、设计内容换成出处、已取消条目一行、21 段「全部未完成条目」原话按三类重标（通用规矩先核对已写进记忆再标 `→ 规矩：`）。
 - [ ] **Step 2：** 派核对子代理（只给三个路径：存档原文、草稿、契约），逐条判据给结论（保留／覆盖到哪句／丢了什么／放宽了什么），并核 `→ 规矩：` 指的记忆确实写了那条规矩；全部通过才换入。
-- [ ] **Step 3：** 换入后量我写的部分（`awk '/^## 用户原话/{exit} {print}' <契约> | LC_ALL=C.UTF-8 wc -m`）≤ 5000；跑新自查 prompt 里的两条命令，三类标注都读得出、没有落空的原话与条目。
+- [ ] **Step 3：** 换入后四项检查（spec C2、C3）：① 我写的部分用自查 prompt 那条 awk 量，≤ 5000；② 每条未完成条目的字数报中位数与最大；③ 标注 grep 读得出三类、没有落空的原话与条目；④ 出处引的原话编号都还在文件里。实测（17:59 换入稿）：① 4,664；② 中位约 410、最大约 664（加密多层那条）；③ 59 段可读；④ 悬空 0。
 
 ### Task 3：审查、合入、重建定时器（spec C4）
 
 - [ ] **Step 1：** 派审查子代理按三条铁律与仓库规范审 `git diff ce9cfe6..HEAD -- SKILL.md README.md`。
-- [ ] **Step 2：** 采纳意见后，核对 spec、计划、`SKILL.md` 三者对齐、每条决定都落了；删 spec 与计划；合入 master，推 GitHub（`git push origin <sha>:master`）。
-- [ ] **Step 3：** 在用的契约按新自查 prompt 重建定时器（删旧的、建新的、id 回填契约、`CronList` 核对）。
+- [ ] **Step 2：** 采纳 Step 1 的审查意见与计划审查的建议（D2 核对不过的动作：按存档改回来，丢的补回、放宽的改回）——改 `SKILL.md` 的交给实现子代理，另起提交。
+- [ ] **Step 3：** 派子代理核对 spec、计划、`SKILL.md` 三者对齐、每条决定都落了（用户流程第 9 步，不自查自证）。
+- [ ] **Step 4：** `git rm` spec 与计划两份文件后提交（尾注照 Global Constraints）。
+- [ ] **Step 5（main 做）：** `git push origin <分支顶 sha>:master` 推 GitHub，本地 master 快进；子代理不推送、不合并。
+- [ ] **Step 6（main 做）：** 在用的契约按新自查 prompt 重建定时器（删旧的 `b97b7d5f`、建新的、id 回填契约、`CronList` 核对）。
