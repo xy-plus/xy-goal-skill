@@ -12,7 +12,6 @@ ITEM_LIMIT = 300
 
 TASK_RE = re.compile(r"^\s*-\s*\[([^\]]*)\]\s*(\S+)(?:\s+.*)?$")
 TASK_ID_RE = re.compile(r"T\d+[①②③④⑤⑥⑦⑧⑨⑩]?")
-TASK_REF_RE = re.compile(r"(?<![A-Za-z0-9])T\d+[①②③④⑤⑥⑦⑧⑨⑩]?")
 QUOTE_START_RE = re.compile(r"^\s*（原话\s+\d+\s*→")
 QUOTE_RE = re.compile(r"^\s*（原话\s+(\d+)\s*→\s*(.*?)）")
 SOURCE_RE = re.compile(r"原话\s+(\d+(?:(?:\s*～\s*\d+)|(?:\s*[、,，]\s*\d+))*)")
@@ -20,10 +19,10 @@ CRON_RE = re.compile(r"^\s*cron_job_id\s*:")
 SESSION_RE = re.compile(r"^\s*session\s*:\s*(.*?)\s*$")
 
 LEDGER_ACCEPTED_RE = re.compile(
-    r"^-\s+T\d+[①②③④⑤⑥⑦⑧⑨⑩]?\s+.+（.+；验收\s+[^）]+）$"
+    r"^-\s+(T\d+[①②③④⑤⑥⑦⑧⑨⑩]?)\s+.+（.+；验收\s+[^）]+）$"
 )
 LEDGER_CANCELLED_RE = re.compile(
-    r"^-\s+\[~\]\s+T\d+[①②③④⑤⑥⑦⑧⑨⑩]?\s+.+（原话\s+\d+：「[^」]+」）$"
+    r"^-\s+\[~\]\s+(T\d+[①②③④⑤⑥⑦⑧⑨⑩]?)\s+.+（原话\s+\d+：「[^」]+」）$"
 )
 
 
@@ -286,7 +285,30 @@ def _parse_contract(path, problems):
     return contract
 
 
-def _check_original_quotes(contract, problems):
+def _parse_landing(landing):
+    """按类别解析原话落点；解释文字中的 T 编号不视作任务号。"""
+    targets = set()
+    errors = []
+    for raw_segment in landing.split("；"):
+        segment = raw_segment.strip()
+        if segment.startswith("规矩："):
+            if not segment[len("规矩："):].strip():
+                errors.append("规矩：后的说明不能为空")
+            continue
+        if segment.startswith("无："):
+            if not segment[len("无："):].strip():
+                errors.append("无：后的说明不能为空")
+            continue
+
+        task_ids = [item.strip() for item in segment.split("、")]
+        if not task_ids or any(not _is_task_id(task_id) for task_id in task_ids):
+            errors.append(f"落点类别格式错误：{segment}")
+            continue
+        targets.update(task_ids)
+    return targets, errors
+
+
+def _check_original_quotes(contract, problems, session_tasks, ledger_ids):
     lines = contract.lines
     quote_headers = [i for i, line in enumerate(lines) if line.strip() == "## 用户原话"]
     if not quote_headers:
@@ -317,21 +339,27 @@ def _check_original_quotes(contract, problems):
         landing = match.group(2).strip()
         if not landing:
             problems.append(Problem(contract.path, _line_number(index), f"原话 {number} 缺少落点"))
-        elif not TASK_REF_RE.search(landing) and not landing.startswith(("规矩：", "无：")):
-            problems.append(Problem(contract.path, _line_number(index), f"原话 {number} 落点须为条目号、规矩：… 或 无：…"))
-
-        targets = set(TASK_REF_RE.findall(landing))
+            targets = set()
+        else:
+            targets, landing_errors = _parse_landing(landing)
+            for error in landing_errors:
+                problems.append(Problem(contract.path, _line_number(index), f"原话 {number} {error}"))
         if number in origins:
             problems.append(Problem(contract.path, _line_number(index), f"原话编号重复：{number}"))
             origins[number]["targets"].update(targets)
         else:
             origins[number] = {"line": _line_number(index), "targets": targets}
 
-    # D1：原话落到在办条目时，条目出处必须列出该原话编号。
+    # D1：原话落点必须命中同 session 的在办条目或本契约账本中的条目。
     for number, origin in origins.items():
         for task_id in origin["targets"]:
-            task = contract.tasks.get(task_id)
-            if task is not None and number not in task.source_ids:
+            matching_tasks = session_tasks.get(task_id, [])
+            if not matching_tasks and task_id not in ledger_ids:
+                problems.append(Problem(
+                    contract.path, origin["line"],
+                    f"原话 {number} 的落点 {task_id} 不在清单也不在账本",
+                ))
+            elif matching_tasks and not any(number in task.source_ids for task in matching_tasks):
                 problems.append(Problem(
                     contract.path, origin["line"],
                     f"原话 {number} 落到 {task_id}，但 {task_id} 的出处没有原话 {number}",
@@ -368,18 +396,24 @@ def _check_wait_targets(contracts, problems):
 def _check_ledger(path, problems):
     lines = _read_lines(path, problems)
     if lines is None:
-        return
+        return set()
+    task_ids = set()
     for index, raw_line in enumerate(lines):
         line = _line_body(raw_line)
         if not line.strip():
             problems.append(Problem(path, _line_number(index), "账本格式错误（不允许空行）"))
             continue
         # D2：账本只能记已验收产物或有原话依据的取消事项。
-        if not LEDGER_ACCEPTED_RE.fullmatch(line) and not LEDGER_CANCELLED_RE.fullmatch(line):
+        accepted = LEDGER_ACCEPTED_RE.fullmatch(line)
+        cancelled = LEDGER_CANCELLED_RE.fullmatch(line)
+        if accepted is None and cancelled is None:
             problems.append(Problem(
                 path, _line_number(index),
                 "账本格式错误（应为验收记录或带原话编号的取消记录）",
             ))
+        else:
+            task_ids.add((accepted or cancelled).group(1))
+    return task_ids
 
 
 def _check_budgets(contracts, problems):
@@ -441,11 +475,26 @@ def check_directory(directory):
         contract = _parse_contract(path, problems)
         if contract is not None:
             contracts.append(contract)
-            _check_original_quotes(contract, problems)
+
+    ledger_ids = {}
+    for path in _find_ledger_files(directory):
+        ledger_ids[path.name] = _check_ledger(path, problems)
+
+    tasks_by_session = {}
+    for contract in contracts:
+        session_tasks = tasks_by_session.setdefault(contract.session, {})
+        for task_id, task in contract.tasks.items():
+            session_tasks.setdefault(task_id, []).append(task)
+    for contract in contracts:
+        expected_ledger = f"{contract.path.stem}.done.md"
+        _check_original_quotes(
+            contract,
+            problems,
+            tasks_by_session.get(contract.session, {}),
+            ledger_ids.get(expected_ledger, set()),
+        )
     _check_wait_targets(contracts, problems)
     _check_budgets(contracts, problems)
-    for path in _find_ledger_files(directory):
-        _check_ledger(path, problems)
 
     problems.sort(key=lambda problem: (problem.path.name, problem.line, problem.message))
     if problems:

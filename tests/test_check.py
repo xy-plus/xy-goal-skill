@@ -247,6 +247,50 @@ class CheckScriptTests(unittest.TestCase):
 
         self.clear_contracts()
         self.write_contract("in-ledger.md", entries=[], quotes=[self.quote(9, "T2")])
+        self.write_ledger("in-ledger.done.md", lines=[
+            "- T2 已验收目标（产物路径；验收 reports/accept-T2.md）",
+        ])
+        self.assert_passes()
+
+        self.clear_contracts()
+        self.write_contract("cancelled-ledger.md", entries=[], quotes=[
+            self.quote(9, "T2"), self.quote(10, "T3"),
+        ])
+        self.write_ledger("cancelled-ledger.done.md", lines=[
+            "- T2 已验收目标（产物路径；验收 reports/accept-T2.md）",
+            "- [~] T3 用户取消（原话 10：「不做」）",
+        ])
+        self.assert_passes()
+
+        self.clear_contracts()
+        self.write_contract("unknown.md", entries=[], quotes=[self.quote(9, "T404")])
+        self.write_ledger("unknown.done.md", lines=[
+            "- T5 已验收其他目标（产物路径；验收 reports/accept-T5.md）",
+        ])
+        self.write_ledger("other.done.md", lines=[
+            "- T404 已验收同名条目（产物路径；验收 reports/accept-T404.md）",
+        ])
+        output = self.assert_problem("原话 9 的落点 T404 不在清单也不在账本")
+        self.assertIn("unknown.md:7: ", output)
+
+    def test_landing_categories_require_descriptions_and_do_not_extract_ids_from_them(self):
+        # D1：按分号分类落点；规矩与无的说明非空，说明里的 T 编号不是条目落点。
+        for landing in ("规矩：", "无："):
+            with self.subTest(landing=landing):
+                self.clear_contracts()
+                self.write_contract(entries=[], quotes=[self.quote(7, landing)])
+                expected = f"{landing[:3]}后的说明不能为空"
+                self.assert_problem(expected)
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(source="原话 8"), quotes=[
+            self.quote(7, "无：T3 已关闭"), self.quote(8, "T3"),
+        ])
+        self.assert_passes()
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(source="原话 9"),
+                            quotes=[self.quote(9, "T3；规矩：记忆 foo；无：已答")])
         self.assert_passes()
 
     def test_required_template_headers_cron_and_session(self):
