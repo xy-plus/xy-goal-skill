@@ -238,7 +238,10 @@ class CheckScriptTests(unittest.TestCase):
                 self.assertEqual(len(output.splitlines()), 1, output)
 
         self.clear_contracts()
-        self.write_contract(entries=self.entry(artifact="等：T3"), quotes=[self.quote()])
+        entries = self.entry(artifact="等：T4")
+        entries += self.entry("T4", source="原话 8", artifact="等：用户：确认输入")
+        self.write_contract(entries=entries,
+                            quotes=[self.quote(7, "T3"), self.quote(8, "T4")])
         self.assert_passes()
 
         self.clear_contracts()
@@ -470,6 +473,45 @@ class CheckScriptTests(unittest.TestCase):
         self.write_contract(entries=self.entry(artifact="等：T9"), quotes=[self.quote()])
         self.write_ledger(lines=["- T9 已验收（产物路径；验收 reports/accept-T9.md）"])
         self.assert_problem("等：T9 指向不在清单中的条目")
+
+    def test_wait_chain_can_end_at_a_live_worker(self):
+        # D4：等待链可以沿开放条目到达仍在工作的非主会话推进者。
+        worker_pid = self.start_live_child().pid
+        entries = self.entry("T1", artifact="等：T2")
+        entries += self.entry(
+            "T2", source="原话 8",
+            artifact=f"在跑：worker（pid {worker_pid}）；产物路径",
+        )
+        self.write_contract(entries=entries,
+                            quotes=[self.quote(7, "T1"), self.quote(8, "T2")])
+
+        self.assert_passes()
+
+    def test_wait_chain_can_end_at_a_user_decision(self):
+        # D4：等待链可以沿开放条目终止于待用户决定的事项。
+        entries = self.entry("T1", artifact="等：T2")
+        entries += self.entry("T2", source="原话 8", artifact="等：用户：确认参数")
+        self.write_contract(entries=entries,
+                            quotes=[self.quote(7, "T1"), self.quote(8, "T2")])
+
+        self.assert_passes()
+
+    def test_wait_cycle_reports_every_task_in_the_cycle(self):
+        # D4：等待关系闭环时，错误应明确列出环上的每个条目。
+        entries = self.entry("T1", artifact="等：T2")
+        entries += self.entry("T2", source="原话 8", artifact="等：T1")
+        self.write_contract(entries=entries,
+                            quotes=[self.quote(7, "T1"), self.quote(8, "T2")])
+
+        output = self.assert_problem("等待链成环：T1 → T2 → T1")
+        self.assertIn("goal.md:8: ", output)
+
+    def test_self_wait_is_reported_as_a_cycle(self):
+        # D4：条目等待自己也是等待环。
+        self.write_contract(entries=self.entry(artifact="等：T3"), quotes=[self.quote()])
+
+        output = self.assert_problem("等待链成环：T3 → T3")
+        self.assertIn("goal.md:8: ", output)
 
     def test_original_quote_requires_a_landing_but_accepts_rule_and_none_landings(self):
         # D1：每段原话标注条目、规矩或无落点。

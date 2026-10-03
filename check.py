@@ -505,6 +505,47 @@ def _check_wait_targets(contracts, problems):
                 ))
 
 
+def _check_wait_cycles(contracts, problems):
+    # D4：等待关系必须无环；环上的每个条目都会出现在链路提示中。
+    tasks_by_session = {}
+    for contract in contracts:
+        session_tasks = tasks_by_session.setdefault(contract.session, {})
+        for task in contract.tasks.values():
+            session_tasks.setdefault(task.task_id, []).append((contract, task))
+
+    for session_tasks in tasks_by_session.values():
+        # 重复 ID 已由其他格式检查报告；只沿唯一 ID 的边检查，避免猜测目标。
+        unique_tasks = {
+            task_id: matches[0]
+            for task_id, matches in session_tasks.items()
+            if len(matches) == 1
+        }
+        finished = set()
+        for start_id in unique_tasks:
+            if start_id in finished:
+                continue
+            chain = []
+            chain_positions = {}
+            task_id = start_id
+            while task_id in unique_tasks and task_id not in finished:
+                if task_id in chain_positions:
+                    cycle = chain[chain_positions[task_id]:]
+                    contract, task = unique_tasks[cycle[0]]
+                    description = " → ".join((*cycle, cycle[0]))
+                    problems.append(Problem(
+                        contract.path, task.artifact_line,
+                        f"等待链成环：{description}",
+                    ))
+                    break
+                chain_positions[task_id] = len(chain)
+                chain.append(task_id)
+                task = unique_tasks[task_id][1]
+                if not task.wait_target:
+                    break
+                task_id = task.wait_target
+            finished.update(chain)
+
+
 def _check_ledger(path, problems):
     lines = _read_lines(path, problems)
     if lines is None:
@@ -628,6 +669,7 @@ def check_directory(directory):
             ledger_ids.get(expected_ledger, set()),
         )
     _check_wait_targets(contracts, problems)
+    _check_wait_cycles(contracts, problems)
     _check_budgets(contracts, problems)
 
     for notice in sorted(notices):
