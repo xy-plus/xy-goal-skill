@@ -113,7 +113,39 @@ def _read_lines(path, problems):
         return None
 
 
-def _parse_artifact(path, line_number, status, artifact, problems):
+def _collect_ancestor_pids():
+    """从当前进程沿 /proc 中的 ppid 向上收集进程链。"""
+    pids = set()
+    pid = os.getpid()
+    while pid > 0 and pid not in pids:
+        pids.add(pid)
+        if pid == 1:
+            return pids, ""
+
+        stat_path = Path("/proc") / str(pid) / "stat"
+        try:
+            stat = stat_path.read_text(encoding="ascii")
+        except (OSError, UnicodeError) as error:
+            return None, f"无法读取 {stat_path}：{type(error).__name__}: {error}"
+
+        closing_paren = stat.rfind(")")
+        if closing_paren < 0:
+            return None, f"无法解析 {stat_path}：缺少进程名结束括号"
+        fields = stat[closing_paren + 1:].split()
+        if len(fields) < 2:
+            return None, f"无法解析 {stat_path}：缺少 ppid 字段"
+        try:
+            parent_pid = int(fields[1])
+        except ValueError:
+            return None, f"无法解析 {stat_path}：ppid 不是整数"
+        if parent_pid <= 0:
+            return pids, ""
+        pid = parent_pid
+
+    return pids, ""
+
+
+def _parse_artifact(path, line_number, status, artifact, problems, ancestor_pids):
     """D4：检查在办与待验收条目的产物前缀，并返回运行名或等待 ID。"""
     if status == "x":
         if not artifact.startswith("待验收："):
@@ -139,6 +171,13 @@ def _parse_artifact(path, line_number, status, artifact, problems):
                 continue
             name, pid_text = match.groups()
             pid = int(pid_text)
+            if ancestor_pids is not None and pid in ancestor_pids:
+                problems.append(Problem(
+                    path, line_number,
+                    f"在跑：{name}（pid {pid}）是运行本检查的会话自己："
+                    "主会话只编排，能派的派给子代理，否则写「等：…」",
+                ))
+                continue
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
@@ -175,7 +214,7 @@ def _parse_artifact(path, line_number, status, artifact, problems):
     return "", ""
 
 
-def _parse_contract(path, problems):
+def _parse_contract(path, problems, ancestor_pids):
     raw_lines = _read_lines(path, problems)
     if raw_lines is None:
         return None
@@ -307,6 +346,7 @@ def _parse_contract(path, problems):
         artifact_value = lines[artifact_index][len("  - 产物："):]
         running_name, wait_target = _parse_artifact(
             path, _line_number(artifact_index), status, artifact_value, problems,
+            ancestor_pids,
         )
         contract.tasks[task_id] = Task(
             task_id=task_id,
@@ -509,8 +549,14 @@ def _print_summary(contracts):
 def check_directory(directory):
     problems = []
     contracts = []
+    ancestor_pids, ancestor_error = _collect_ancestor_pids()
+    if ancestor_error:
+        print(
+            f"提示：{ancestor_error}；跳过自身会话 PID 检查",
+            file=sys.stderr,
+        )
     for path in _find_contract_files(directory):
-        contract = _parse_contract(path, problems)
+        contract = _parse_contract(path, problems, ancestor_pids)
         if contract is not None:
             contracts.append(contract)
 

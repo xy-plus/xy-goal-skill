@@ -6,11 +6,16 @@ import subprocess
 import sys
 import tempfile
 import unittest
+from contextlib import redirect_stderr, redirect_stdout
+from io import StringIO
 from pathlib import Path
+from unittest import mock
 
 
 ROOT = Path(__file__).resolve().parents[1]
 SCRIPT = ROOT / "check.py"
+sys.path.insert(0, str(ROOT))
+import check as check_module
 
 
 class CheckScriptTests(unittest.TestCase):
@@ -20,6 +25,17 @@ class CheckScriptTests(unittest.TestCase):
 
     def tearDown(self):
         self.temp_dir.cleanup()
+
+    def start_live_child(self):
+        child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+        self.addCleanup(self.stop_child, child)
+        return child
+
+    @staticmethod
+    def stop_child(child):
+        if child.poll() is None:
+            child.terminate()
+        child.wait()
 
     def clear_contracts(self):
         for child in self.contract_dir.iterdir():
@@ -54,7 +70,7 @@ class CheckScriptTests(unittest.TestCase):
     def entry(task_id="T3", *, status=" ", criteria="完成验收条件",
               source="原话 7", artifact=None):
         if artifact is None:
-            artifact = f"在跑：任务名（pid {os.getpid()}）；产物路径"
+            artifact = "等：用户：等待输入"
         return [
             f"- [{status}] {task_id} 测试条目",
             f"  - 判据：{criteria}",
@@ -203,12 +219,12 @@ class CheckScriptTests(unittest.TestCase):
 
     def test_artifact_prefixes_wait_targets_and_running_names(self):
         # D4：在跑、等、待验收前缀受检；等的条目必须还在清单里。
-        current_pid = os.getpid()
+        live_pid = self.start_live_child().pid
         self.write_contract(entries=self.entry(
-            artifact=f"在跑：worker-a（pid {current_pid}）；产物路径"),
+            artifact=f"在跑：worker-a（pid {live_pid}）；产物路径"),
                             quotes=[self.quote()])
         output = self.assert_passes().stdout
-        self.assertIn(f"在跑：worker-a（pid {current_pid}）", output)
+        self.assertIn(f"在跑：worker-a（pid {live_pid}）", output)
 
         self.clear_contracts()
         self.write_contract(entries=self.entry(artifact="等：用户：确认参数"),
@@ -216,9 +232,9 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
         self.clear_contracts()
-        entries = self.entry(artifact=f"在跑：worker-a（pid {current_pid}）；产物")
+        entries = self.entry(artifact=f"在跑：worker-a（pid {live_pid}）；产物")
         entries += self.entry("T4", source="原话 8",
-                              artifact=f"在跑：worker-b（pid {current_pid}）；产物")
+                              artifact=f"在跑：worker-b（pid {live_pid}）；产物")
         self.write_contract(entries=entries,
                             quotes=[self.quote(7, "T3"), self.quote(8, "T4")])
         output = self.assert_passes().stdout
@@ -240,14 +256,65 @@ class CheckScriptTests(unittest.TestCase):
                             quotes=[self.quote()])
         self.assert_passes()
 
-    def test_running_process_pid_is_checked_and_included_in_summary(self):
-        pid = os.getpid()
+    def test_live_non_ancestor_child_pid_is_checked_and_included_in_summary(self):
+        pid = self.start_live_child().pid
         self.write_contract(entries=self.entry(
-            artifact=f"在跑：self（pid {pid}）；产物路径"), quotes=[self.quote()])
+            artifact=f"在跑：worker（pid {pid}）；产物路径"), quotes=[self.quote()])
 
         result = self.assert_passes()
 
-        self.assertIn(f"在跑：self（pid {pid}）", result.stdout)
+        self.assertIn(f"在跑：worker（pid {pid}）", result.stdout)
+
+    def test_running_ancestor_pid_is_rejected_at_artifact_line(self):
+        ancestor_pid = os.getppid()
+        self.write_contract(entries=self.entry(
+            artifact=f"在跑：主会话（pid {ancestor_pid}）；产物路径"),
+                            quotes=[self.quote()])
+
+        result = self.run_check(self.contract_dir)
+
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        self.assertEqual(
+            result.stderr.strip(),
+            f"goal.md:8: 在跑：主会话（pid {ancestor_pid}）是运行本检查的会话自己："
+            "主会话只编排，能派的派给子代理，否则写「等：…」",
+        )
+
+    def test_permission_error_while_checking_running_pid_counts_as_alive(self):
+        pid = 2147483647
+        self.write_contract(entries=self.entry(
+            artifact=f"在跑：worker（pid {pid}）；产物路径"), quotes=[self.quote()])
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with mock.patch.object(check_module.os, "kill", side_effect=PermissionError), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            returncode = check_module.check_directory(self.contract_dir)
+
+        self.assertEqual(returncode, 0, stderr.getvalue())
+        self.assertIn(f"在跑：worker（pid {pid}）", stdout.getvalue())
+
+    def test_unreadable_proc_skips_ancestor_check_and_reports_why(self):
+        ancestor_pid = os.getppid()
+        self.write_contract(entries=self.entry(
+            artifact=f"在跑：主会话（pid {ancestor_pid}）；产物路径"),
+                            quotes=[self.quote()])
+        real_read_text = Path.read_text
+
+        def deny_proc(path, *args, **kwargs):
+            if path.as_posix().startswith("/proc/"):
+                raise PermissionError("proc hidden")
+            return real_read_text(path, *args, **kwargs)
+
+        stdout = StringIO()
+        stderr = StringIO()
+        with mock.patch.object(Path, "read_text", deny_proc), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            returncode = check_module.check_directory(self.contract_dir)
+
+        self.assertEqual(returncode, 0, stdout.getvalue() + stderr.getvalue())
+        self.assertIn("跳过自身会话 PID 检查", stderr.getvalue())
+        self.assertIn("PermissionError: proc hidden", stderr.getvalue())
 
     def test_exited_running_process_is_reported_at_artifact_line(self):
         child = subprocess.Popen([sys.executable, "-c", "pass"])
@@ -282,7 +349,7 @@ class CheckScriptTests(unittest.TestCase):
         child = subprocess.Popen([sys.executable, "-c", "pass"])
         dead_pid = child.pid
         child.wait()
-        live_pid = os.getpid()
+        live_pid = self.start_live_child().pid
         self.write_contract(entries=self.entry(
             artifact=(f"在跑：live（pid {live_pid}）、child（pid {dead_pid}）；产物路径")),
             quotes=[self.quote()])
