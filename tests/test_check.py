@@ -30,10 +30,10 @@ class CheckScriptTests(unittest.TestCase):
 
     def write_contract(self, name="goal.md", *, entries=None, quotes=None,
                        preamble="", checklist_header=True, quotes_header=True,
-                       cron=True, session="session-1"):
+                       cron=True, cron_value="123", session="session-1"):
         lines = ["# 测试目标"]
         if cron:
-            lines.append("cron_job_id: 123")
+            lines.append(f"cron_job_id: {cron_value}")
         if session is not None:
             lines.append(f"session: {session}")
         if preamble:
@@ -133,6 +133,45 @@ class CheckScriptTests(unittest.TestCase):
         self.write_contract("too-long.md", entries=rows, quotes=[self.quote()])
         output = self.assert_problem("条目合计 301 字，超过 300 字")
         self.assertRegex(output, r"too-long\.md:5: ")
+
+    def test_required_criteria_and_source_must_be_nonempty(self):
+        # D4：判据与出处字段有前缀还不够，正文也必须非空。
+        self.write_contract(entries=self.entry(criteria=""), quotes=[self.quote()])
+        output = self.assert_problem("判据：内容不能为空")
+        self.assertIn("goal.md:6: ", output)
+        self.assertEqual(len(output.splitlines()), 1, output)
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(source=""),
+                            quotes=[self.quote(7, "无：无需对应在办条目")])
+        output = self.assert_problem("出处：内容不能为空")
+        self.assertIn("goal.md:7: ", output)
+        self.assertEqual(len(output.splitlines()), 1, output)
+
+    def test_running_waiting_and_acceptance_prefixes_require_values(self):
+        # D4：「谁在动」前缀后必须有任务名、条目 ID 或验收产物。
+        for artifact, expected in (
+            ("在跑：", "「在跑：」后必须有任务或代理名"),
+            ("等：", "「等：」后应为条目 ID 或「用户：…」"),
+            ("待验收：", "[x] 「待验收：」后必须有产物指针"),
+        ):
+            with self.subTest(artifact=artifact):
+                self.clear_contracts()
+                status = "x" if artifact.startswith("待验收：") else " "
+                self.write_contract(entries=self.entry(status=status, artifact=artifact),
+                                    quotes=[self.quote()])
+                output = self.assert_problem(expected)
+                self.assertIn("goal.md:8: ", output)
+                self.assertEqual(len(output.splitlines()), 1, output)
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(artifact="等：T3"), quotes=[self.quote()])
+        self.assert_passes()
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(status="x", artifact="待验收：reports/check.md"),
+                            quotes=[self.quote()])
+        self.assert_passes()
 
     def test_multiline_criteria_count_toward_item_limit_without_format_error(self):
         # D3：判据换行仍属于同一条目，并计入四行预算。
@@ -314,6 +353,33 @@ class CheckScriptTests(unittest.TestCase):
         self.write_contract("no-session.md", entries=[], quotes=["session: body text"],
                             session=None)
         self.assert_problem("缺少 session: 行")
+
+        self.clear_contracts()
+        self.write_contract("empty-cron.md", entries=[], quotes=[], cron_value="")
+        output = self.assert_problem("cron_job_id: 值不能为空")
+        self.assertIn("empty-cron.md:2: ", output)
+        self.assertEqual(len(output.splitlines()), 1, output)
+
+    def test_each_session_has_one_contract_but_distinct_sessions_are_allowed(self):
+        # D3：一份 session 只对应一份契约；该规则独立于 5000 字预算。
+        self.write_contract("a.md", entries=[], quotes=[], session="shared")
+        self.write_contract("b.md", entries=[], quotes=[], session="shared")
+        output = self.assert_problem(
+            "session shared 已有另一份契约 b.md，一个会话只许一份"
+        )
+        self.assertIn("a.md:1: ", output)
+        self.assertIn("session shared 已有另一份契约 a.md，一个会话只许一份", output)
+        self.assertIn("b.md:1: ", output)
+        self.assertEqual(len(output.splitlines()), 2, output)
+        self.assertLess(len((self.contract_dir / "a.md").read_text(encoding="utf-8"))
+                        + len((self.contract_dir / "b.md").read_text(encoding="utf-8")), 5000)
+
+        self.clear_contracts()
+        self.write_contract("a.md", entries=[], quotes=[], session="one")
+        self.write_contract("b.md", entries=[], quotes=[], session="two")
+        output = self.assert_passes().stdout
+        self.assertIn("session=one", output)
+        self.assertIn("session=two", output)
 
     def test_original_text_mention_and_multiline_criteria_are_not_misparsed(self):
         # D1/D3：原话正文里的相似字样不是段首标注，跨行判据照样计数。

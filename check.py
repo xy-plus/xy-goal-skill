@@ -171,8 +171,12 @@ def _parse_contract(path, problems):
         problems.append(Problem(path, _line_number(duplicate), "「## 用户原话」标题重复"))
     if list_index >= 0 and quote_index >= 0 and list_index > quote_index:
         problems.append(Problem(path, _line_number(list_index), "「## 清单」必须位于「## 用户原话」之前"))
-    if not any(CRON_RE.match(line) for line in header_lines):
+    cron_rows = [(i, line) for i, line in enumerate(header_lines) if CRON_RE.match(line)]
+    if not cron_rows:
         problems.append(Problem(path, 1, "缺少 cron_job_id: 行"))
+    for cron_index, cron_line in cron_rows:
+        if not cron_line.split(":", 1)[1].strip():
+            problems.append(Problem(path, _line_number(cron_index), "cron_job_id: 值不能为空"))
 
     # D3：每份契约头显式记录会话；预算之后按这个值分组。
     session_rows = [(i, match.group(1)) for i, line in enumerate(header_lines)
@@ -226,6 +230,8 @@ def _parse_contract(path, problems):
             problems.append(Problem(path, _line_number(cursor), f"条目 {task_id} 缺少「判据：」行"))
             index += 1
             continue
+        if not lines[cursor][len("  - 判据："):].strip():
+            problems.append(Problem(path, _line_number(cursor), "判据：内容不能为空"))
         criteria_rows.append(lines[cursor])
         cursor += 1
         while cursor < checklist_end and not lines[cursor].startswith("  - 出处："):
@@ -262,6 +268,8 @@ def _parse_contract(path, problems):
             ))
 
         source_value = lines[source_index][len("  - 出处："):]
+        if not source_value.strip():
+            problems.append(Problem(path, _line_number(source_index), "出处：内容不能为空"))
         source_ids, malformed = _expand_quote_numbers(source_value)
         for component in malformed:
             problems.append(Problem(path, _line_number(source_index), f"出处中的原话区间格式错误：{component}"))
@@ -475,6 +483,21 @@ def check_directory(directory):
         contract = _parse_contract(path, problems)
         if contract is not None:
             contracts.append(contract)
+
+    # D3：一个 session 只对应一份在办契约；每份重复契约都给出指向另一份的错误。
+    contracts_by_session = {}
+    for contract in contracts:
+        if contract.session:
+            contracts_by_session.setdefault(contract.session, []).append(contract)
+    for session, members in contracts_by_session.items():
+        if len(members) < 2:
+            continue
+        for contract in members:
+            other = next(member for member in members if member.path != contract.path)
+            problems.append(Problem(
+                contract.path, 1,
+                f"session {session} 已有另一份契约 {other.path.name}，一个会话只许一份",
+            ))
 
     ledger_ids = {}
     for path in _find_ledger_files(directory):
