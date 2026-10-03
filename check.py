@@ -2,6 +2,7 @@
 """检查 xy-goal 在办契约的格式、预算、原话索引与账本。"""
 
 from dataclasses import dataclass, field
+import os
 from pathlib import Path
 import re
 import sys
@@ -17,6 +18,7 @@ QUOTE_RE = re.compile(r"^\s*（原话\s+(\d+)\s*→\s*(.*?)）")
 SOURCE_RE = re.compile(r"原话\s+(\d+(?:(?:\s*～\s*\d+)|(?:\s*[、,，]\s*\d+))*)")
 CRON_RE = re.compile(r"^\s*cron_job_id\s*:")
 SESSION_RE = re.compile(r"^\s*session\s*:\s*(.*?)\s*$")
+RUNNING_ENTRY_RE = re.compile(r"^(.+?)（pid ([1-9]\d*)）$")
 
 LEDGER_ACCEPTED_RE = re.compile(
     r"^-\s+(T\d+[①②③④⑤⑥⑦⑧⑨⑩]?)\s+.+（.+；验收\s+[^）]+）$"
@@ -123,7 +125,35 @@ def _parse_artifact(path, line_number, status, artifact, problems):
     if artifact.startswith("在跑："):
         running_name = re.split(r"[；;]", artifact[len("在跑："):], maxsplit=1)[0].strip()
         if not running_name:
-            problems.append(Problem(path, line_number, "「在跑：」后必须有任务或代理名"))
+            problems.append(Problem(
+                path, line_number,
+                "「在跑：」要写进程号（pid N），脚本才能核它还活着",
+            ))
+            return "", ""
+
+        pid_missing = False
+        for entry in running_name.split("、"):
+            match = RUNNING_ENTRY_RE.fullmatch(entry.strip())
+            if match is None:
+                pid_missing = True
+                continue
+            name, pid_text = match.groups()
+            pid = int(pid_text)
+            try:
+                os.kill(pid, 0)
+            except ProcessLookupError:
+                problems.append(Problem(
+                    path, line_number,
+                    f"在跑：{name}（pid {pid}）的进程已不在：收尾、送验或重派",
+                ))
+            except PermissionError:
+                pass
+
+        if pid_missing:
+            problems.append(Problem(
+                path, line_number,
+                "「在跑：」要写进程号（pid N），脚本才能核它还活着",
+            ))
         return running_name, ""
 
     if artifact.startswith("等："):

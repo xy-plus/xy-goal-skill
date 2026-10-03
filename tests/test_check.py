@@ -52,7 +52,9 @@ class CheckScriptTests(unittest.TestCase):
 
     @staticmethod
     def entry(task_id="T3", *, status=" ", criteria="完成验收条件",
-              source="原话 7", artifact="在跑：任务名；产物路径"):
+              source="原话 7", artifact=None):
+        if artifact is None:
+            artifact = f"在跑：任务名（pid {os.getpid()}）；产物路径"
         return [
             f"- [{status}] {task_id} 测试条目",
             f"  - 判据：{criteria}",
@@ -151,7 +153,7 @@ class CheckScriptTests(unittest.TestCase):
     def test_running_waiting_and_acceptance_prefixes_require_values(self):
         # D4：「谁在动」前缀后必须有任务名、条目 ID 或验收产物。
         for artifact, expected in (
-            ("在跑：", "「在跑：」后必须有任务或代理名"),
+            ("在跑：worker", "「在跑：」要写进程号（pid N），脚本才能核它还活着"),
             ("等：", "「等：」后应为条目 ID 或「用户：…」"),
             ("待验收：", "[x] 「待验收：」后必须有产物指针"),
         ):
@@ -201,10 +203,12 @@ class CheckScriptTests(unittest.TestCase):
 
     def test_artifact_prefixes_wait_targets_and_running_names(self):
         # D4：在跑、等、待验收前缀受检；等的条目必须还在清单里。
-        self.write_contract(entries=self.entry(artifact="在跑：worker-a；产物路径"),
+        current_pid = os.getpid()
+        self.write_contract(entries=self.entry(
+            artifact=f"在跑：worker-a（pid {current_pid}）；产物路径"),
                             quotes=[self.quote()])
         output = self.assert_passes().stdout
-        self.assertIn("在跑：worker-a", output)
+        self.assertIn(f"在跑：worker-a（pid {current_pid}）", output)
 
         self.clear_contracts()
         self.write_contract(entries=self.entry(artifact="等：用户：确认参数"),
@@ -212,8 +216,9 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
         self.clear_contracts()
-        entries = self.entry(artifact="在跑：worker-a；产物")
-        entries += self.entry("T4", source="原话 8", artifact="在跑：worker-b；产物")
+        entries = self.entry(artifact=f"在跑：worker-a（pid {current_pid}）；产物")
+        entries += self.entry("T4", source="原话 8",
+                              artifact=f"在跑：worker-b（pid {current_pid}）；产物")
         self.write_contract(entries=entries,
                             quotes=[self.quote(7, "T3"), self.quote(8, "T4")])
         output = self.assert_passes().stdout
@@ -234,6 +239,62 @@ class CheckScriptTests(unittest.TestCase):
         self.write_contract(entries=self.entry(status="x", artifact="待验收：报告路径"),
                             quotes=[self.quote()])
         self.assert_passes()
+
+    def test_running_process_pid_is_checked_and_included_in_summary(self):
+        pid = os.getpid()
+        self.write_contract(entries=self.entry(
+            artifact=f"在跑：self（pid {pid}）；产物路径"), quotes=[self.quote()])
+
+        result = self.assert_passes()
+
+        self.assertIn(f"在跑：self（pid {pid}）", result.stdout)
+
+    def test_exited_running_process_is_reported_at_artifact_line(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead_pid = child.pid
+        child.wait()
+        self.write_contract(entries=self.entry(
+            artifact=f"在跑：child（pid {dead_pid}）；产物路径"), quotes=[self.quote()])
+
+        result = self.run_check(self.contract_dir)
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 1, output)
+        self.assertEqual(
+            output.strip(),
+            f"goal.md:8: 在跑：child（pid {dead_pid}）的进程已不在：收尾、送验或重派",
+        )
+
+    def test_running_entry_without_pid_reports_required_pid_at_artifact_line(self):
+        self.write_contract(entries=self.entry(
+            artifact="在跑：worker；产物路径"), quotes=[self.quote()])
+
+        result = self.run_check(self.contract_dir)
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 1, output)
+        self.assertEqual(
+            output.strip(),
+            "goal.md:8: 「在跑：」要写进程号（pid N），脚本才能核它还活着",
+        )
+
+    def test_only_exited_pid_is_reported_when_running_entry_lists_two(self):
+        child = subprocess.Popen([sys.executable, "-c", "pass"])
+        dead_pid = child.pid
+        child.wait()
+        live_pid = os.getpid()
+        self.write_contract(entries=self.entry(
+            artifact=(f"在跑：live（pid {live_pid}）、child（pid {dead_pid}）；产物路径")),
+            quotes=[self.quote()])
+
+        result = self.run_check(self.contract_dir)
+        output = result.stdout + result.stderr
+
+        self.assertEqual(result.returncode, 1, output)
+        self.assertEqual(
+            output.strip(),
+            f"goal.md:8: 在跑：child（pid {dead_pid}）的进程已不在：收尾、送验或重派",
+        )
 
     def test_waiting_for_missing_or_closed_task_fails_and_waiting_for_open_task_passes(self):
         # D4：等：Tn 只允许指向清单中仍开着的条目。
