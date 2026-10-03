@@ -1,0 +1,328 @@
+"""check.py 的契约格式与预算测试。"""
+
+import os
+import shutil
+import subprocess
+import sys
+import tempfile
+import unittest
+from pathlib import Path
+
+
+ROOT = Path(__file__).resolve().parents[1]
+SCRIPT = ROOT / "check.py"
+
+
+class CheckScriptTests(unittest.TestCase):
+    def setUp(self):
+        self.temp_dir = tempfile.TemporaryDirectory()
+        self.contract_dir = Path(self.temp_dir.name)
+
+    def tearDown(self):
+        self.temp_dir.cleanup()
+
+    def clear_contracts(self):
+        for child in self.contract_dir.iterdir():
+            if child.is_dir():
+                shutil.rmtree(child)
+            else:
+                child.unlink()
+
+    def write_contract(self, name="goal.md", *, entries=None, quotes=None,
+                       preamble="", checklist_header=True, quotes_header=True,
+                       cron=True, session="session-1"):
+        lines = ["# 测试目标"]
+        if cron:
+            lines.append("cron_job_id: 123")
+        if session is not None:
+            lines.append(f"session: {session}")
+        if preamble:
+            lines.append(preamble)
+        if checklist_header:
+            lines.append("## 清单")
+        lines.extend(entries or [])
+        if quotes_header:
+            lines.append("## 用户原话")
+            for quote in quotes or []:
+                lines.extend(["", quote])
+        path = self.contract_dir / name
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+        return path
+
+    @staticmethod
+    def entry(task_id="T3", *, status=" ", criteria="完成验收条件",
+              source="原话 7", artifact="在跑：任务名；产物路径"):
+        return [
+            f"- [{status}] {task_id} 测试条目",
+            f"  - 判据：{criteria}",
+            f"  - 出处：{source}",
+            f"  - 产物：{artifact}",
+        ]
+
+    @staticmethod
+    def quote(number=7, landing="T3"):
+        return f"（原话 {number} → {landing}）用户要求。"
+
+    def write_ledger(self, name="goal.done.md", lines=()):
+        path = self.contract_dir / name
+        path.write_text("\n".join(lines) + ("\n" if lines else ""), encoding="utf-8")
+        return path
+
+    def run_check(self, *args):
+        return subprocess.run(
+            [sys.executable, str(SCRIPT), *map(str, args)],
+            cwd=ROOT,
+            text=True,
+            capture_output=True,
+            check=False,
+        )
+
+    def assert_passes(self, *args):
+        result = self.run_check(self.contract_dir, *args)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        return result
+
+    def assert_problem(self, expected, *args):
+        result = self.run_check(self.contract_dir, *args)
+        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
+        output = result.stdout + result.stderr
+        self.assertIn(expected, output)
+        self.assertRegex(output, r"[^\n]+:\d+: ")
+        return output
+
+    def test_budget_sums_by_session_not_by_file_or_across_sessions(self):
+        # D3：同一 session 的契约合计；不同 session 各自计数。
+        for name, session, filler_char in (("a.md", "same", "甲"),
+                                            ("b.md", "same", "乙")):
+            fixed = f"# 测试目标\ncron_job_id: 123\nsession: {session}\n\n## 清单\n"
+            self.write_contract(name, session=session,
+                                preamble=filler_char * (3000 - len(fixed)))
+        output = self.assert_problem("session same 的清单部分合计 6000 字，超过 5000 字上限")
+        self.assertRegex(output, r"b\.md:\d+: ")
+
+        self.clear_contracts()
+        for name, session, filler_char in (("a.md", "one", "甲"),
+                                            ("b.md", "two", "乙")):
+            fixed = f"# 测试目标\ncron_job_id: 123\nsession: {session}\n\n## 清单\n"
+            self.write_contract(name, session=session,
+                                preamble=filler_char * (3000 - len(fixed)))
+        output = self.assert_passes().stdout
+        self.assertIn("session=one", output)
+        self.assertIn("session=two", output)
+        self.assertIn("a.md 3000 字", output)
+        self.assertIn("b.md 3000 字", output)
+
+        self.clear_contracts()
+        fixed = "# 测试目标\ncron_job_id: 123\nsession: only\n\n## 清单\n"
+        self.write_contract(preamble="甲" * (4000 - len(fixed)), session="only")
+        self.assertIn("4000 字", self.assert_passes().stdout)
+
+    def test_four_line_item_over_300_fails_and_exactly_300_passes(self):
+        # D3：每条标题、判据、出处、产物合计最多 300 字。
+        target = 300
+        rows = self.entry()
+        base_size = len("\n".join(rows))
+        rows[1] += "字" * (target - base_size)
+        self.assertEqual(len("\n".join(rows)), target)
+        self.write_contract(entries=rows, quotes=[self.quote()])
+        self.assert_passes()
+
+        self.clear_contracts()
+        rows[1] += "字"
+        self.write_contract("too-long.md", entries=rows, quotes=[self.quote()])
+        output = self.assert_problem("条目合计 301 字，超过 300 字")
+        self.assertRegex(output, r"too-long\.md:5: ")
+
+    def test_multiline_criteria_count_toward_item_limit_without_format_error(self):
+        # D3：判据换行仍属于同一条目，并计入四行预算。
+        rows = self.entry()
+        rows.insert(2, "    判据的第二行")
+        base_size = len("\n".join(rows))
+        rows[2] += "字" * (300 - base_size)
+        self.assertEqual(len("\n".join(rows)), 300)
+        self.write_contract(entries=rows, quotes=[self.quote()])
+        self.assert_passes()
+
+        self.clear_contracts()
+        rows[2] += "字"
+        self.write_contract(entries=rows, quotes=[self.quote()])
+        output = self.assert_problem("条目合计 301 字，超过 300 字")
+        self.assertNotIn("应为「出处：」", output)
+
+    def test_character_count_matches_wc_m_under_utf8_locale(self):
+        # D3：Python len(str) 与 UTF-8 locale 下 wc -m 的字符口径一致。
+        sample = "中文abc\n🙂"
+        env = dict(os.environ, LC_ALL="C.UTF-8")
+        wc = subprocess.run(
+            ["wc", "-m"], input=sample, text=True, capture_output=True,
+            env=env, check=True,
+        )
+        self.assertEqual(len(sample), int(wc.stdout.split()[0]))
+
+    def test_artifact_prefixes_wait_targets_and_running_names(self):
+        # D4：在跑、等、待验收前缀受检；等的条目必须还在清单里。
+        self.write_contract(entries=self.entry(artifact="在跑：worker-a；产物路径"),
+                            quotes=[self.quote()])
+        output = self.assert_passes().stdout
+        self.assertIn("在跑：worker-a", output)
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(artifact="等：用户：确认参数"),
+                            quotes=[self.quote()])
+        self.assert_passes()
+
+        self.clear_contracts()
+        entries = self.entry(artifact="在跑：worker-a；产物")
+        entries += self.entry("T4", source="原话 8", artifact="在跑：worker-b；产物")
+        self.write_contract(entries=entries,
+                            quotes=[self.quote(7, "T3"), self.quote(8, "T4")])
+        output = self.assert_passes().stdout
+        self.assertIn("worker-a", output)
+        self.assertIn("worker-b", output)
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(artifact="报告路径"), quotes=[self.quote()])
+        output = self.assert_problem("缺少「谁在动」前缀")
+        self.assertIn("goal.md:8: ", output)
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(status="x", artifact="已完成"),
+                            quotes=[self.quote()])
+        self.assert_problem("[x] 产物栏必须以「待验收：」开头")
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(status="x", artifact="待验收：报告路径"),
+                            quotes=[self.quote()])
+        self.assert_passes()
+
+    def test_waiting_for_missing_or_closed_task_fails_and_waiting_for_open_task_passes(self):
+        # D4：等：Tn 只允许指向清单中仍开着的条目。
+        self.write_contract(entries=self.entry(artifact="等：T9"), quotes=[self.quote()])
+        output = self.assert_problem("等：T9 指向不在清单中的条目")
+        self.assertIn("goal.md:8: ", output)
+
+        self.clear_contracts()
+        entries = self.entry(artifact="等：T9；等 T9 的产物")
+        entries += self.entry("T9", source="原话 8")
+        self.write_contract(entries=entries,
+                            quotes=[self.quote(7, "T3"), self.quote(8, "T9")])
+        self.assert_passes()
+
+        self.clear_contracts()
+        self.write_contract(entries=self.entry(artifact="等：T9"), quotes=[self.quote()])
+        self.write_ledger(lines=["- T9 已验收（产物路径；验收 reports/accept-T9.md）"])
+        self.assert_problem("等：T9 指向不在清单中的条目")
+
+    def test_original_quote_requires_a_landing_but_accepts_rule_and_none_landings(self):
+        # D1：每段原话标注条目、规矩或无落点。
+        self.write_contract(entries=[], quotes=["（原话 7 → ）用户要求。"])
+        self.assert_problem("原话 7 缺少落点")
+
+        for landing in ("规矩：记忆 foo", "无：状态查询已回答"):
+            with self.subTest(landing=landing):
+                self.clear_contracts()
+                self.write_contract("valid.md", entries=[],
+                                    quotes=[self.quote(7, landing)])
+                self.assert_passes()
+
+    def test_source_ranges_expand_and_every_referenced_quote_must_exist(self):
+        # D1：出处区间展开后，每个原话编号都必须存在。
+        rows = self.entry(source="原话 113～115、120")
+        quotes = [self.quote(n) for n in (113, 115, 120)]
+        self.write_contract(entries=rows, quotes=quotes)
+        output = self.assert_problem("出处引用的原话 114 不存在")
+        self.assertIn("goal.md:7: ", output)
+
+        self.clear_contracts()
+        self.write_contract("complete-range.md", entries=rows,
+                            quotes=[self.quote(n) for n in (113, 114, 115, 120)])
+        self.assert_passes()
+
+    def test_landing_to_active_item_must_match_its_source_but_ledger_items_are_allowed(self):
+        # D1/D2：在办条目的原话落点与出处对应；已入账条目不必留在清单。
+        self.write_contract(entries=self.entry(source="原话 8"),
+                            quotes=[self.quote(8, "T3"), self.quote(9, "T3")])
+        self.assert_problem("原话 9 落到 T3，但 T3 的出处没有原话 9")
+
+        self.clear_contracts()
+        self.write_contract("in-ledger.md", entries=[], quotes=[self.quote(9, "T2")])
+        self.assert_passes()
+
+    def test_required_template_headers_cron_and_session(self):
+        # D3/D4/D8：契约头和两个必要区段都存在。
+        self.write_contract(entries=[], quotes=[])
+        self.assert_passes()
+
+        self.clear_contracts()
+        self.write_contract("no-list.md", entries=[], quotes=[], checklist_header=False)
+        self.assert_problem("缺少「## 清单」标题")
+
+        self.clear_contracts()
+        self.write_contract("no-quotes.md", entries=[], quotes=[], quotes_header=False)
+        self.assert_problem("缺少「## 用户原话」标题")
+
+        self.clear_contracts()
+        self.write_contract("no-cron.md", entries=[], quotes=[], cron=False)
+        self.assert_problem("缺少 cron_job_id: 行")
+
+        self.clear_contracts()
+        self.write_contract("no-session.md", entries=[], quotes=["session: body text"],
+                            session=None)
+        self.assert_problem("缺少 session: 行")
+
+    def test_original_text_mention_and_multiline_criteria_are_not_misparsed(self):
+        # D1/D3：原话正文里的相似字样不是段首标注，跨行判据照样计数。
+        rows = self.entry()
+        rows.insert(2, "    判据第二行")
+        self.write_contract(entries=rows, quotes=[
+            self.quote(7, "T3"),
+            "正文里提到「（原话 3 说过旧口径）」但这不是标注。",
+        ])
+        self.assert_passes()
+
+    def test_done_ledgers_require_one_of_the_two_closed_item_forms(self):
+        # D2：账本仅接纳验收记录与按原话取消的记录，且不计入预算。
+        self.write_contract(entries=[], quotes=[])
+        self.write_ledger(lines=[
+            "- T1 已验收目标（产物路径；验收 reports/accept-T1.md）",
+            "- [~] T2 用户取消（原话 9：「不做」）",
+        ])
+        self.assert_passes()
+
+        self.clear_contracts()
+        self.write_contract(entries=[], quotes=[])
+        self.write_ledger(lines=["- [ ] T5 还在办（报告路径）"])
+        output = self.assert_problem("账本格式错误")
+        self.assertIn("goal.done.md:1: ", output)
+
+        self.clear_contracts()
+        self.write_contract(entries=[], quotes=[])
+        self.write_ledger(lines=[""])
+        self.assert_problem("账本格式错误（不允许空行）")
+
+        self.clear_contracts()
+        self.write_contract(entries=[], quotes=[])
+        self.write_ledger(lines=["- T6 一句话（没有验收或原话来源）"])
+        self.assert_problem("账本格式错误")
+
+    def test_only_top_level_contracts_are_checked_and_archive_and_ledgers_are_not_budgeted(self):
+        # D2/D3/D6：只读目录顶层契约；archive 与账本不参加 session 预算。
+        self.write_contract("active.md", preamble="活" * 100)
+        self.write_contract("archive/old.md", preamble="旧" * 6000)
+        self.write_contract("nested/ignored.md", preamble="嵌" * 6000)
+        self.write_ledger(lines=["- T1 已验收目标（产物路径；验收 reports/accept.md）"])
+        result = self.assert_passes()
+        self.assertIn("active.md", result.stdout)
+        self.assertNotIn("old.md", result.stdout)
+        self.assertNotIn("ignored.md", result.stdout)
+        self.assertNotIn("goal.done.md", result.stdout)
+
+    def test_missing_argument_exits_with_usage_code_2(self):
+        result = self.run_check()
+        self.assertEqual(result.returncode, 2, result.stdout + result.stderr)
+        self.assertIn("必须显式提供契约目录", result.stderr)
+
+
+if __name__ == "__main__":
+    unittest.main()
