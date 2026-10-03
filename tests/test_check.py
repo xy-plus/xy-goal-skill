@@ -5,6 +5,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import time
 import unittest
 from contextlib import redirect_stderr, redirect_stdout
 from io import StringIO
@@ -30,6 +31,60 @@ class CheckScriptTests(unittest.TestCase):
         child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
         self.addCleanup(self.stop_child, child)
         return child
+
+    def start_python_check_worker(self, marker):
+        worker_code = (
+            "import pathlib, subprocess, sys, time\n"
+            "marker, script, directory = sys.argv[1:]\n"
+            "while not pathlib.Path(marker).exists(): time.sleep(0.01)\n"
+            "result = subprocess.run([sys.executable, script, directory], "
+            "capture_output=True, text=True)\n"
+            "sys.stdout.write(result.stdout)\n"
+            "sys.stderr.write(result.stderr)\n"
+            "raise SystemExit(result.returncode)\n"
+        )
+        worker = subprocess.Popen(
+            [sys.executable, "-c", worker_code, str(marker), str(SCRIPT),
+             str(self.contract_dir)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self.stop_child, worker)
+        return worker
+
+    def start_claude_exe_check_worker(self, marker):
+        bash = shutil.which("bash")
+        self.assertIsNotNone(bash, "该 Linux 回归测试需要 bash 二进制")
+        launcher = self.contract_dir / "claude.exe"
+        shutil.copy2(bash, launcher)
+        shell_code = (
+            'while [ ! -e "$1" ]; do sleep 0.01; done\n'
+            'python3 "$2" "$3"\n'
+            'status=$?\n'
+            'exit "$status"'
+        )
+        worker = subprocess.Popen(
+            [str(launcher), "-c", shell_code, "xy-goal-test",
+             str(marker), str(SCRIPT), str(self.contract_dir)],
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+        )
+        self.addCleanup(self.stop_child, worker)
+        deadline = time.monotonic() + 5
+        executable = None
+        while time.monotonic() < deadline and worker.poll() is None:
+            try:
+                executable = Path(os.readlink(f"/proc/{worker.pid}/exe")).resolve()
+            except OSError:
+                time.sleep(0.01)
+                continue
+            if executable == launcher.resolve():
+                break
+            time.sleep(0.01)
+        self.assertEqual(executable, launcher.resolve())
+        return worker
 
     @staticmethod
     def stop_child(child):
@@ -265,19 +320,37 @@ class CheckScriptTests(unittest.TestCase):
 
         self.assertIn(f"在跑：worker（pid {pid}）", result.stdout)
 
-    def test_running_ancestor_pid_is_rejected_at_artifact_line(self):
-        ancestor_pid = os.getppid()
+    def test_live_non_claude_worker_ancestor_pid_passes(self):
+        marker = self.contract_dir / "worker-ready"
+        worker = self.start_python_check_worker(marker)
+        executable = Path(os.readlink(f"/proc/{worker.pid}/exe")).name
+        self.assertNotIn(executable, {"claude", "claude.exe"})
         self.write_contract(entries=self.entry(
-            artifact=f"在跑：主会话（pid {ancestor_pid}）；产物路径"),
+            artifact=f"在跑：worker（pid {worker.pid}）；产物路径"),
                             quotes=[self.quote()])
+        marker.touch()
 
-        result = self.run_check(self.contract_dir)
+        stdout, stderr = worker.communicate(timeout=10)
 
-        self.assertEqual(result.returncode, 1, result.stdout + result.stderr)
-        self.assertEqual(
-            result.stderr.strip(),
-            f"goal.md:8: 在跑：主会话（pid {ancestor_pid}）是运行本检查的会话自己："
+        self.assertEqual(worker.returncode, 0, stdout + stderr)
+        self.assertIn(f"在跑：worker（pid {worker.pid}）", stdout)
+
+    def test_running_claude_exe_ancestor_pid_is_rejected_at_artifact_line(self):
+        marker = self.contract_dir / "claude-ready"
+        worker = self.start_claude_exe_check_worker(marker)
+        self.write_contract(entries=self.entry(
+            artifact=f"在跑：主会话（pid {worker.pid}）；产物路径"),
+                            quotes=[self.quote()])
+        marker.touch()
+
+        stdout, stderr = worker.communicate(timeout=10)
+
+        self.assertEqual(worker.returncode, 1, stdout + stderr)
+        self.assertIn(
+            f"goal.md:8: 在跑：主会话（pid {worker.pid}）是运行本检查会话的 "
+            "Claude Code 主会话："
             "主会话只编排，能派的派给子代理，否则写「等：…」",
+            stderr.splitlines(),
         )
 
     def test_permission_error_while_checking_running_pid_counts_as_alive(self):
@@ -315,6 +388,23 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(returncode, 0, stdout.getvalue() + stderr.getvalue())
         self.assertIn("跳过自身会话 PID 检查", stderr.getvalue())
         self.assertIn("PermissionError: proc hidden", stderr.getvalue())
+
+    def test_unreadable_proc_exe_skips_pid_identity_check_and_reports_why(self):
+        ancestor_pid = os.getppid()
+        self.write_contract(entries=self.entry(
+            artifact=f"在跑：worker（pid {ancestor_pid}）；产物路径"),
+                            quotes=[self.quote()])
+        stdout = StringIO()
+        stderr = StringIO()
+
+        with mock.patch.object(check_module.os, "readlink",
+                               side_effect=PermissionError("exe hidden")), \
+                redirect_stdout(stdout), redirect_stderr(stderr):
+            returncode = check_module.check_directory(self.contract_dir)
+
+        self.assertEqual(returncode, 0, stdout.getvalue() + stderr.getvalue())
+        self.assertIn("跳过该 PID 的主会话身份检查", stderr.getvalue())
+        self.assertIn("PermissionError: exe hidden", stderr.getvalue())
 
     def test_exited_running_process_is_reported_at_artifact_line(self):
         child = subprocess.Popen([sys.executable, "-c", "pass"])

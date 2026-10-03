@@ -113,40 +113,70 @@ def _read_lines(path, problems):
         return None
 
 
-def _collect_ancestor_pids():
-    """从当前进程沿 /proc 中的 ppid 向上收集进程链。"""
-    pids = set()
+def _collect_ancestor_processes():
+    """读取祖先链的可执行文件名，并标出 Claude Code 主会话进程。"""
+    ancestor_pids = set()
+    main_session_pids = set()
+    executable_errors = {}
     pid = os.getpid()
-    while pid > 0 and pid not in pids:
-        pids.add(pid)
+    while pid > 0 and pid not in ancestor_pids:
+        ancestor_pids.add(pid)
+
+        executable_path = Path("/proc") / str(pid) / "exe"
+        try:
+            executable = os.readlink(executable_path)
+        except OSError as error:
+            executable_errors[pid] = (
+                f"提示：无法读取 {executable_path}：{type(error).__name__}: {error}；"
+                "跳过该 PID 的主会话身份检查"
+            )
+        else:
+            if executable.endswith(" (deleted)"):
+                executable = executable[:-len(" (deleted)")]
+            if Path(executable).name in {"claude", "claude.exe"}:
+                main_session_pids.add(pid)
+
         if pid == 1:
-            return pids, ""
+            return ancestor_pids, main_session_pids, executable_errors, ""
 
         stat_path = Path("/proc") / str(pid) / "stat"
         try:
             stat = stat_path.read_text(encoding="ascii")
         except (OSError, UnicodeError) as error:
-            return None, f"无法读取 {stat_path}：{type(error).__name__}: {error}"
+            return None, set(), {}, (
+                f"提示：无法读取 {stat_path}：{type(error).__name__}: {error}；"
+                "跳过自身会话 PID 检查"
+            )
 
         closing_paren = stat.rfind(")")
         if closing_paren < 0:
-            return None, f"无法解析 {stat_path}：缺少进程名结束括号"
+            return None, set(), {}, (
+                f"提示：无法解析 {stat_path}：缺少进程名结束括号；"
+                "跳过自身会话 PID 检查"
+            )
         fields = stat[closing_paren + 1:].split()
         if len(fields) < 2:
-            return None, f"无法解析 {stat_path}：缺少 ppid 字段"
+            return None, set(), {}, (
+                f"提示：无法解析 {stat_path}：缺少 ppid 字段；"
+                "跳过自身会话 PID 检查"
+            )
         try:
             parent_pid = int(fields[1])
         except ValueError:
-            return None, f"无法解析 {stat_path}：ppid 不是整数"
+            return None, set(), {}, (
+                f"提示：无法解析 {stat_path}：ppid 不是整数；"
+                "跳过自身会话 PID 检查"
+            )
         if parent_pid <= 0:
-            return pids, ""
+            return ancestor_pids, main_session_pids, executable_errors, ""
         pid = parent_pid
 
-    return pids, ""
+    return ancestor_pids, main_session_pids, executable_errors, ""
 
 
-def _parse_artifact(path, line_number, status, artifact, problems, ancestor_pids):
+def _parse_artifact(path, line_number, status, artifact, problems, process_chain, notices):
     """D4：检查在办与待验收条目的产物前缀，并返回运行名或等待 ID。"""
+    ancestor_pids, main_session_pids, executable_errors = process_chain
     if status == "x":
         if not artifact.startswith("待验收："):
             problems.append(Problem(path, line_number, "[x] 产物栏必须以「待验收：」开头"))
@@ -172,12 +202,16 @@ def _parse_artifact(path, line_number, status, artifact, problems, ancestor_pids
             name, pid_text = match.groups()
             pid = int(pid_text)
             if ancestor_pids is not None and pid in ancestor_pids:
-                problems.append(Problem(
-                    path, line_number,
-                    f"在跑：{name}（pid {pid}）是运行本检查的会话自己："
-                    "主会话只编排，能派的派给子代理，否则写「等：…」",
-                ))
-                continue
+                if pid in main_session_pids:
+                    problems.append(Problem(
+                        path, line_number,
+                        f"在跑：{name}（pid {pid}）是运行本检查会话的 "
+                        "Claude Code 主会话："
+                        "主会话只编排，能派的派给子代理，否则写「等：…」",
+                    ))
+                    continue
+                if pid in executable_errors:
+                    notices.add(executable_errors[pid])
             try:
                 os.kill(pid, 0)
             except ProcessLookupError:
@@ -214,7 +248,7 @@ def _parse_artifact(path, line_number, status, artifact, problems, ancestor_pids
     return "", ""
 
 
-def _parse_contract(path, problems, ancestor_pids):
+def _parse_contract(path, problems, process_chain, notices):
     raw_lines = _read_lines(path, problems)
     if raw_lines is None:
         return None
@@ -346,7 +380,7 @@ def _parse_contract(path, problems, ancestor_pids):
         artifact_value = lines[artifact_index][len("  - 产物："):]
         running_name, wait_target = _parse_artifact(
             path, _line_number(artifact_index), status, artifact_value, problems,
-            ancestor_pids,
+            process_chain, notices,
         )
         contract.tasks[task_id] = Task(
             task_id=task_id,
@@ -549,14 +583,15 @@ def _print_summary(contracts):
 def check_directory(directory):
     problems = []
     contracts = []
-    ancestor_pids, ancestor_error = _collect_ancestor_pids()
-    if ancestor_error:
-        print(
-            f"提示：{ancestor_error}；跳过自身会话 PID 检查",
-            file=sys.stderr,
-        )
+    ancestor_pids, main_session_pids, executable_errors, scan_notice = (
+        _collect_ancestor_processes()
+    )
+    process_chain = (ancestor_pids, main_session_pids, executable_errors)
+    notices = set()
+    if scan_notice:
+        notices.add(scan_notice)
     for path in _find_contract_files(directory):
-        contract = _parse_contract(path, problems, ancestor_pids)
+        contract = _parse_contract(path, problems, process_chain, notices)
         if contract is not None:
             contracts.append(contract)
 
@@ -595,6 +630,8 @@ def check_directory(directory):
     _check_wait_targets(contracts, problems)
     _check_budgets(contracts, problems)
 
+    for notice in sorted(notices):
+        print(notice, file=sys.stderr)
     problems.sort(key=lambda problem: (problem.path.name, problem.line, problem.message))
     if problems:
         for problem in problems:
