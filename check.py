@@ -96,7 +96,7 @@ def _is_task_id(value):
 
 
 def _find_contract_files(directory):
-    """D6：只看目录顶层契约；账本在单独的检查中处理。"""
+    """只检查目录顶层的在办契约；账本由单独检查处理。"""
     return sorted(
         (path for path in directory.glob("*.md") if not path.name.endswith(".done.md")),
         key=lambda path: path.name,
@@ -179,7 +179,7 @@ def _collect_ancestor_processes():
 
 
 def _parse_artifact(path, line_number, status, artifact, problems, process_chain, notices):
-    """D4：检查产物前缀，并返回运行名或所有等待目标。"""
+    """检查产物栏格式，并提取运行名称或等待目标。"""
     ancestor_pids, main_session_pids, executable_errors = process_chain
     if status == "x":
         if not artifact.startswith("待验收："):
@@ -268,7 +268,7 @@ def _parse_contract(path, problems, process_chain, notices):
     )
     header_lines = lines[:header_end]
 
-    # D4/D8：契约模板要有清单、原话区与 cron_job_id。
+    # 契约必须包含清单、原话区与 cron_job_id。
     if not list_indices:
         problems.append(Problem(path, 1, "缺少「## 清单」标题"))
     if not quote_indices:
@@ -286,7 +286,7 @@ def _parse_contract(path, problems, process_chain, notices):
         if not cron_line.split(":", 1)[1].strip():
             problems.append(Problem(path, _line_number(cron_index), "cron_job_id: 值不能为空"))
 
-    # D3：每份契约头显式记录会话；预算之后按这个值分组。
+    # 每份契约头都要记录 session，预算按该值分组。
     session_rows = [(i, match.group(1)) for i, line in enumerate(header_lines)
                     if (match := SESSION_RE.match(line))]
     session = ""
@@ -299,7 +299,7 @@ def _parse_contract(path, problems, process_chain, notices):
         for duplicate, _ in session_rows[1:]:
             problems.append(Problem(path, _line_number(duplicate), "session: 行重复"))
 
-    # D3：清单部分是 ## 用户原话 之前的实际文本，包含模板头与换行。
+    # 预算统计 ## 用户原话 之前的文本，包含模板头与换行。
     count_until = quote_index if quote_index >= 0 else len(raw_lines)
     list_chars = len("".join(raw_lines[:count_until]))
     list_line = _line_number(list_index if list_index >= 0 else 0)
@@ -313,7 +313,7 @@ def _parse_contract(path, problems, process_chain, notices):
         stripped = body.strip()
         if stripped.startswith(("已验收：", "已取消：")) or re.match(
                 r"^##\s*(已验收|已取消)(?:\s|$)", stripped):
-            # D2：已验收、已取消内容应移入同目录账本，不留在契约清单。
+            # 已验收或已取消内容应移到同目录账本，不留在在办清单。
             problems.append(Problem(path, _line_number(index), "已验收或已取消内容应移入 .done.md 账本"))
 
         task_match = TASK_RE.match(body)
@@ -331,7 +331,7 @@ def _parse_contract(path, problems, process_chain, notices):
         if task_id in contract.tasks:
             problems.append(Problem(path, _line_number(index), f"条目编号重复：{task_id}"))
 
-        # D3/D4：判据可续行；条目由标题、判据全文、出处、产物组成。
+        # 判据允许续行；条目由标题、完整判据、出处和产物构成。
         cursor = index + 1
         criteria_rows = []
         if cursor >= checklist_end or not lines[cursor].startswith("  - 判据："):
@@ -444,7 +444,7 @@ def _check_original_quotes(contract, problems, session_tasks, ledger_ids):
             continue
         paragraph_start = False
 
-        # D1：只认段首的「原话 N →」；原话正文提到「原话 N 说过」只是内容。
+        # 只把段首的「原话 N →」识别为标注；正文中的相似文字仍是原话内容。
         if not QUOTE_START_RE.match(body):
             continue
         match = QUOTE_RE.match(body)
@@ -467,7 +467,7 @@ def _check_original_quotes(contract, problems, session_tasks, ledger_ids):
         else:
             origins[number] = {"line": _line_number(index), "targets": targets}
 
-    # D1：原话落点必须命中同 session 的在办条目或本契约账本中的条目。
+    # 原话落点必须命中同一 session 的在办条目或本契约账本中的条目。
     for number, origin in origins.items():
         for task_id in origin["targets"]:
             matching_tasks = session_tasks.get(task_id, [])
@@ -482,7 +482,7 @@ def _check_original_quotes(contract, problems, session_tasks, ledger_ids):
                     f"原话 {number} 落到 {task_id}，但 {task_id} 的出处没有原话 {number}",
                 ))
 
-    # D1：每条出处引用的原话必须存在，且落点要包含对应的在办条目。
+    # 出处引用的原话必须存在，且其落点必须包含对应的在办条目。
     for task in contract.tasks.values():
         for number in sorted(task.source_ids):
             origin = origins.get(number)
@@ -496,7 +496,7 @@ def _check_original_quotes(contract, problems, session_tasks, ledger_ids):
 
 
 def _check_wait_targets(contracts, problems):
-    # D4：等：列出的每个 Tn 都必须指向同一 session 中仍留在清单的条目。
+    # 等：列出的每个条目都必须仍在同一 session 的清单中。
     tasks_by_session = {}
     for contract in contracts:
         tasks_by_session.setdefault(contract.session, set()).update(contract.tasks)
@@ -512,7 +512,7 @@ def _check_wait_targets(contracts, problems):
 
 
 def _check_wait_cycles(contracts, problems):
-    # D4：等待图的所有目标都是边；用强连通分量报告所有环上条目。
+    # 把每个等待目标作为边，报告所有等待环中的条目。
     tasks_by_session = {}
     for contract in contracts:
         session_tasks = tasks_by_session.setdefault(contract.session, {})
@@ -612,7 +612,7 @@ def _check_ledger(path, problems):
         if not line.strip():
             problems.append(Problem(path, _line_number(index), "账本格式错误（不允许空行）"))
             continue
-        # D2：账本只能记已验收产物或有原话依据的取消事项。
+        # 账本只能记录已验收产物或有原话依据的取消事项。
         accepted = LEDGER_ACCEPTED_RE.fullmatch(line)
         cancelled = LEDGER_CANCELLED_RE.fullmatch(line)
         if accepted is None and cancelled is None:
@@ -626,7 +626,7 @@ def _check_ledger(path, problems):
 
 
 def _check_budgets(contracts, problems):
-    # D3：按 session 汇总所有在办契约，拆文件不会降低总量。
+    # 按 session 汇总所有在办契约的预算，拆分文件不会降低总量。
     groups = {}
     for contract in contracts:
         groups.setdefault(contract.session, []).append(contract)
@@ -692,7 +692,7 @@ def check_directory(directory):
         if contract is not None:
             contracts.append(contract)
 
-    # D3：一个 session 只对应一份在办契约；每份重复契约都给出指向另一份的错误。
+    # 一个 session 只对应一份在办契约；对每份重复契约都报告另一份的位置。
     contracts_by_session = {}
     for contract in contracts:
         if contract.session:

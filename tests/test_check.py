@@ -165,7 +165,7 @@ class CheckScriptTests(unittest.TestCase):
         return output
 
     def test_budget_sums_by_session_not_by_file_or_across_sessions(self):
-        # D3：同一 session 的契约合计；不同 session 各自计数。
+        # 同一 session 的多份契约合并计数，不同 session 分开计数。
         for name, session, filler_char in (("a.md", "same", "甲"),
                                             ("b.md", "same", "乙")):
             fixed = f"# 测试目标\ncron_job_id: 123\nsession: {session}\n\n## 清单\n"
@@ -192,7 +192,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertIn("4000 字", self.assert_passes().stdout)
 
     def test_four_line_item_over_300_fails_and_exactly_300_passes(self):
-        # D3：每条标题、判据、出处、产物合计最多 300 字。
+        # 每项的标题、判据、出处和产物合计不得超过 300 字。
         target = 300
         rows = self.entry()
         base_size = len("\n".join(rows))
@@ -208,7 +208,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertRegex(output, r"too-long\.md:5: ")
 
     def test_required_criteria_and_source_must_be_nonempty(self):
-        # D4：判据与出处字段有前缀还不够，正文也必须非空。
+        # 判据与出处不能只写字段前缀，正文必须非空。
         self.write_contract(entries=self.entry(criteria=""), quotes=[self.quote()])
         output = self.assert_problem("判据：内容不能为空")
         self.assertIn("goal.md:6: ", output)
@@ -222,7 +222,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(len(output.splitlines()), 1, output)
 
     def test_running_waiting_and_acceptance_prefixes_require_values(self):
-        # D4：「谁在动」前缀后必须有任务名、条目 ID 或验收产物。
+        # 「谁在动」字段须包含任务名、条目 ID 或验收产物。
         for artifact, expected in (
             ("在跑：worker", "「在跑：」要写进程号（pid N），脚本才能核它还活着"),
             ("等：", "「等：」后应为条目 ID 或「用户：…」"),
@@ -250,7 +250,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
     def test_multiline_criteria_count_toward_item_limit_without_format_error(self):
-        # D3：判据换行仍属于同一条目，并计入四行预算。
+        # 判据换行仍属于同一条目，并计入四行字数预算。
         rows = self.entry()
         rows.insert(2, "    判据的第二行")
         base_size = len("\n".join(rows))
@@ -266,7 +266,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertNotIn("应为「出处：」", output)
 
     def test_character_count_matches_wc_m_under_utf8_locale(self):
-        # D3：Python len(str) 与 UTF-8 locale 下 wc -m 的字符口径一致。
+        # Python len(str) 与 UTF-8 locale 下 wc -m 的字符口径一致。
         sample = "中文abc\n🙂"
         env = dict(os.environ, LC_ALL="C.UTF-8")
         wc = subprocess.run(
@@ -276,7 +276,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(len(sample), int(wc.stdout.split()[0]))
 
     def test_artifact_prefixes_wait_targets_and_running_names(self):
-        # D4：在跑、等、待验收前缀受检；等的条目必须还在清单里。
+        # 检查在跑、等、待验收前缀；等待目标必须仍在清单中。
         live_pid = self.start_live_child().pid
         self.write_contract(entries=self.entry(
             artifact=f"在跑：worker-a（pid {live_pid}）；产物路径"),
@@ -457,7 +457,7 @@ class CheckScriptTests(unittest.TestCase):
         )
 
     def test_waiting_for_missing_or_closed_task_fails_and_waiting_for_open_task_passes(self):
-        # D4：等：Tn 只允许指向清单中仍开着的条目。
+        # 等：只能指向清单中仍开放的条目。
         self.write_contract(entries=self.entry(artifact="等：T9"), quotes=[self.quote()])
         output = self.assert_problem("等：T9 指向不在清单中的条目")
         self.assertIn("goal.md:8: ", output)
@@ -475,7 +475,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_problem("等：T9 指向不在清单中的条目")
 
     def test_wait_chain_can_end_at_a_live_worker(self):
-        # D4：等待链可以沿开放条目到达仍在工作的非主会话推进者。
+        # 等待链可以经过开放条目到达仍在工作的非主会话推进者。
         worker_pid = self.start_live_child().pid
         entries = self.entry("T1", artifact="等：T2")
         entries += self.entry(
@@ -488,7 +488,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
     def test_wait_chain_can_end_at_a_user_decision(self):
-        # D4：等待链可以沿开放条目终止于待用户决定的事项。
+        # 等待链可以经过开放条目终止于待用户决定的事项。
         entries = self.entry("T1", artifact="等：T2")
         entries += self.entry("T2", source="原话 8", artifact="等：用户：确认参数")
         self.write_contract(entries=entries,
@@ -497,7 +497,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
     def test_wait_cycle_reports_every_task_in_the_cycle(self):
-        # D4：等待关系闭环时，错误应明确列出环上的每个条目。
+        # 等待关系成环时，错误应明确列出环上的每个条目。
         entries = self.entry("T1", artifact="等：T2")
         entries += self.entry("T2", source="原话 8", artifact="等：T1")
         self.write_contract(entries=entries,
@@ -507,14 +507,14 @@ class CheckScriptTests(unittest.TestCase):
         self.assertIn("goal.md:8: ", output)
 
     def test_self_wait_is_reported_as_a_cycle(self):
-        # D4：条目等待自己也是等待环。
+        # 条目等待自己也应被识别为等待环。
         self.write_contract(entries=self.entry(artifact="等：T3"), quotes=[self.quote()])
 
         output = self.assert_problem("等待链成环：T3 → T3")
         self.assertIn("goal.md:8: ", output)
 
     def test_wait_list_accepts_multiple_open_targets_across_acyclic_branches(self):
-        # D4：多个开放目标都是等待边；各分支可分别终止于推进者或用户。
+        # 多个开放目标都是等待边，各分支可分别终止于推进者或用户。
         worker_pid = self.start_live_child().pid
         entries = self.entry("T1", artifact="等：T2，T3")
         entries += self.entry(
@@ -529,7 +529,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
     def test_wait_list_rejects_a_closed_target_even_when_another_target_is_open(self):
-        # D4：逗号列出的每个目标都必须仍在清单中，关闭目标不能被首个目标遮住。
+        # 逗号列出的每个目标都必须仍在清单中，不能漏掉后面的关闭目标。
         entries = self.entry("T1", artifact="等：T2，T9")
         entries += self.entry("T2", source="原话 8", artifact="等：用户：确认参数")
         self.write_contract(entries=entries,
@@ -540,7 +540,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertIn("goal.md:8: ", output)
 
     def test_cycle_through_second_wait_target_is_reported(self):
-        # D4：每个目标都是图边，第二个目标形成的环也必须发现。
+        # 每个目标都是图边，第二个目标形成的环也必须被发现。
         entries = self.entry("T1", artifact="等：T2, T3")
         entries += self.entry("T2", source="原话 8", artifact="等：用户：确认参数")
         entries += self.entry("T3", source="原话 9", artifact="等：T1")
@@ -554,7 +554,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertIn("goal.md:8: ", output)
 
     def test_waiting_for_an_acceptance_pending_task_is_a_valid_terminal(self):
-        # D2/D4：[x] 仍在清单中，作为待验收终点由验收者推进。
+        # [x] 待验收事项仍在清单中，可以作为等待链的终点。
         entries = self.entry("T1", artifact="等：T2")
         entries += self.entry("T2", status="x", source="原话 8",
                               artifact="待验收：reports/accept-T2.md")
@@ -564,7 +564,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
     def test_original_quote_requires_a_landing_but_accepts_rule_and_none_landings(self):
-        # D1：每段原话标注条目、规矩或无落点。
+        # 原话标注必须说明落到条目、规矩或无落点。
         self.write_contract(entries=[], quotes=["（原话 7 → ）用户要求。"])
         self.assert_problem("原话 7 缺少落点")
 
@@ -576,7 +576,7 @@ class CheckScriptTests(unittest.TestCase):
                 self.assert_passes()
 
     def test_source_ranges_expand_and_every_referenced_quote_must_exist(self):
-        # D1：出处区间展开后，每个原话编号都必须存在。
+        # 出处区间展开后，其中每个原话编号都必须存在。
         rows = self.entry(source="原话 113～115、120")
         quotes = [self.quote(n) for n in (113, 115, 120)]
         self.write_contract(entries=rows, quotes=quotes)
@@ -589,7 +589,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
     def test_landing_to_active_item_must_match_its_source_but_ledger_items_are_allowed(self):
-        # D1/D2：在办条目的原话落点与出处对应；已入账条目不必留在清单。
+        # 在办条目的原话落点须与出处对应；已入账条目不必留在清单。
         self.write_contract(entries=self.entry(source="原话 8"),
                             quotes=[self.quote(8, "T3"), self.quote(9, "T3")])
         self.assert_problem("原话 9 落到 T3，但 T3 的出处没有原话 9")
@@ -623,7 +623,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertIn("unknown.md:7: ", output)
 
     def test_landing_categories_require_descriptions_and_do_not_extract_ids_from_them(self):
-        # D1：按分号分类落点；规矩与无的说明非空，说明里的 T 编号不是条目落点。
+        # 分号分隔不同落点；规矩与无的说明须非空，其中的 T 编号不算条目落点。
         for landing in ("规矩：", "无："):
             with self.subTest(landing=landing):
                 self.clear_contracts()
@@ -643,7 +643,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
     def test_required_template_headers_cron_and_session(self):
-        # D3/D4/D8：契约头和两个必要区段都存在。
+        # 契约头和清单、用户原话两个必要区段都存在。
         self.write_contract(entries=[], quotes=[])
         self.assert_passes()
 
@@ -671,7 +671,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertEqual(len(output.splitlines()), 1, output)
 
     def test_each_session_has_one_contract_but_distinct_sessions_are_allowed(self):
-        # D3：一份 session 只对应一份契约；该规则独立于 5000 字预算。
+        # 一个 session 只允许一份契约，这条规则独立于 5000 字预算。
         self.write_contract("a.md", entries=[], quotes=[], session="shared")
         self.write_contract("b.md", entries=[], quotes=[], session="shared")
         output = self.assert_problem(
@@ -692,7 +692,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assertIn("session=two", output)
 
     def test_original_text_mention_and_multiline_criteria_are_not_misparsed(self):
-        # D1/D3：原话正文里的相似字样不是段首标注，跨行判据照样计数。
+        # 原话正文里的相似字样不是段首标注，跨行判据照样计数。
         rows = self.entry()
         rows.insert(2, "    判据第二行")
         self.write_contract(entries=rows, quotes=[
@@ -702,7 +702,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_passes()
 
     def test_done_ledgers_require_one_of_the_two_closed_item_forms(self):
-        # D2：账本仅接纳验收记录与按原话取消的记录，且不计入预算。
+        # 账本只接纳验收记录与有原话依据的取消记录，且不计入预算。
         self.write_contract(entries=[], quotes=[])
         self.write_ledger(lines=[
             "- T1 已验收目标（产物路径；验收 reports/accept-T1.md）",
@@ -727,7 +727,7 @@ class CheckScriptTests(unittest.TestCase):
         self.assert_problem("账本格式错误")
 
     def test_only_top_level_contracts_are_checked_and_archive_and_ledgers_are_not_budgeted(self):
-        # D2/D3/D6：只读目录顶层契约；archive 与账本不参加 session 预算。
+        # 只读目录顶层契约；archive 与账本不参加 session 预算。
         self.write_contract("active.md", preamble="活" * 100)
         self.write_contract("archive/old.md", preamble="旧" * 6000)
         self.write_contract("nested/ignored.md", preamble="嵌" * 6000)
