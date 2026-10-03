@@ -513,6 +513,56 @@ class CheckScriptTests(unittest.TestCase):
         output = self.assert_problem("等待链成环：T3 → T3")
         self.assertIn("goal.md:8: ", output)
 
+    def test_wait_list_accepts_multiple_open_targets_across_acyclic_branches(self):
+        # D4：多个开放目标都是等待边；各分支可分别终止于推进者或用户。
+        worker_pid = self.start_live_child().pid
+        entries = self.entry("T1", artifact="等：T2，T3")
+        entries += self.entry(
+            "T2", source="原话 8",
+            artifact=f"在跑：worker（pid {worker_pid}）；产物路径",
+        )
+        entries += self.entry("T3", source="原话 9", artifact="等：用户：确认参数")
+        self.write_contract(entries=entries, quotes=[
+            self.quote(7, "T1"), self.quote(8, "T2"), self.quote(9, "T3"),
+        ])
+
+        self.assert_passes()
+
+    def test_wait_list_rejects_a_closed_target_even_when_another_target_is_open(self):
+        # D4：逗号列出的每个目标都必须仍在清单中，关闭目标不能被首个目标遮住。
+        entries = self.entry("T1", artifact="等：T2，T9")
+        entries += self.entry("T2", source="原话 8", artifact="等：用户：确认参数")
+        self.write_contract(entries=entries,
+                            quotes=[self.quote(7, "T1"), self.quote(8, "T2")])
+        self.write_ledger(lines=["- T9 已验收（产物路径；验收 reports/accept-T9.md）"])
+
+        output = self.assert_problem("等：T9 指向不在清单中的条目")
+        self.assertIn("goal.md:8: ", output)
+
+    def test_cycle_through_second_wait_target_is_reported(self):
+        # D4：每个目标都是图边，第二个目标形成的环也必须发现。
+        entries = self.entry("T1", artifact="等：T2, T3")
+        entries += self.entry("T2", source="原话 8", artifact="等：用户：确认参数")
+        entries += self.entry("T3", source="原话 9", artifact="等：T1")
+        self.write_contract(entries=entries, quotes=[
+            self.quote(7, "T1"), self.quote(8, "T2"), self.quote(9, "T3"),
+        ])
+
+        output = self.assert_problem("等待链成环")
+        self.assertIn("T1", output)
+        self.assertIn("T3", output)
+        self.assertIn("goal.md:8: ", output)
+
+    def test_waiting_for_an_acceptance_pending_task_is_a_valid_terminal(self):
+        # D2/D4：[x] 仍在清单中，作为待验收终点由验收者推进。
+        entries = self.entry("T1", artifact="等：T2")
+        entries += self.entry("T2", status="x", source="原话 8",
+                              artifact="待验收：reports/accept-T2.md")
+        self.write_contract(entries=entries,
+                            quotes=[self.quote(7, "T1"), self.quote(8, "T2")])
+
+        self.assert_passes()
+
     def test_original_quote_requires_a_landing_but_accepts_rule_and_none_landings(self):
         # D1：每段原话标注条目、规矩或无落点。
         self.write_contract(entries=[], quotes=["（原话 7 → ）用户要求。"])

@@ -13,6 +13,10 @@ ITEM_LIMIT = 300
 
 TASK_RE = re.compile(r"^\s*-\s*\[([^\]]*)\]\s*(\S+)(?:\s+.*)?$")
 TASK_ID_RE = re.compile(r"T\d+[①②③④⑤⑥⑦⑧⑨⑩]?")
+WAIT_TARGET_ID_PATTERN = r"T\d+[①②③④⑤⑥⑦⑧⑨⑩]?"
+WAIT_TARGETS_RE = re.compile(
+    rf"^({WAIT_TARGET_ID_PATTERN}(?:\s*[,，]\s*{WAIT_TARGET_ID_PATTERN})*)(?=$|[；;。\s])"
+)
 QUOTE_START_RE = re.compile(r"^\s*（原话\s+\d+\s*→")
 QUOTE_RE = re.compile(r"^\s*（原话\s+(\d+)\s*→\s*(.*?)）")
 SOURCE_RE = re.compile(r"原话\s+(\d+(?:(?:\s*～\s*\d+)|(?:\s*[、,，]\s*\d+))*)")
@@ -43,7 +47,7 @@ class Task:
     source_line: int
     artifact_line: int
     source_ids: set = field(default_factory=set)
-    wait_target: str = ""
+    wait_targets: list = field(default_factory=list)
     running_name: str = ""
 
 
@@ -175,14 +179,14 @@ def _collect_ancestor_processes():
 
 
 def _parse_artifact(path, line_number, status, artifact, problems, process_chain, notices):
-    """D4：检查在办与待验收条目的产物前缀，并返回运行名或等待 ID。"""
+    """D4：检查产物前缀，并返回运行名或所有等待目标。"""
     ancestor_pids, main_session_pids, executable_errors = process_chain
     if status == "x":
         if not artifact.startswith("待验收："):
             problems.append(Problem(path, line_number, "[x] 产物栏必须以「待验收：」开头"))
         elif not artifact[len("待验收："):].strip():
             problems.append(Problem(path, line_number, "[x] 「待验收：」后必须有产物指针"))
-        return "", ""
+        return "", []
 
     if artifact.startswith("在跑："):
         running_name = re.split(r"[；;]", artifact[len("在跑："):], maxsplit=1)[0].strip()
@@ -191,7 +195,7 @@ def _parse_artifact(path, line_number, status, artifact, problems, process_chain
                 path, line_number,
                 "「在跑：」要写进程号（pid N），脚本才能核它还活着",
             ))
-            return "", ""
+            return "", []
 
         pid_missing = False
         for entry in running_name.split("、"):
@@ -227,25 +231,26 @@ def _parse_artifact(path, line_number, status, artifact, problems, process_chain
                 path, line_number,
                 "「在跑：」要写进程号（pid N），脚本才能核它还活着",
             ))
-        return running_name, ""
+        return running_name, []
 
     if artifact.startswith("等："):
         target = artifact[len("等："):].strip()
         if target.startswith("用户："):
             if not target[len("用户："):].strip():
                 problems.append(Problem(path, line_number, "「等：用户：」后必须写待决定事项"))
-            return "", ""
-        match = re.match(r"^(T\d+[①②③④⑤⑥⑦⑧⑨⑩]?)(?=$|[；;，,。\s])", target)
+            return "", []
+        match = WAIT_TARGETS_RE.match(target)
         if match is None:
             problems.append(Problem(path, line_number, "「等：」后应为条目 ID 或「用户：…」"))
-            return "", ""
-        return "", match.group(1)
+            return "", []
+        wait_targets = re.split(r"\s*[,，]\s*", match.group(1))
+        return "", wait_targets
 
     problems.append(Problem(
         path, line_number,
         "[ ] 产物栏缺少「谁在动」前缀（应以「在跑：」或「等：」开头）",
     ))
-    return "", ""
+    return "", []
 
 
 def _parse_contract(path, problems, process_chain, notices):
@@ -378,7 +383,7 @@ def _parse_contract(path, problems, process_chain, notices):
             problems.append(Problem(path, _line_number(source_index), f"出处中的原话区间格式错误：{component}"))
 
         artifact_value = lines[artifact_index][len("  - 产物："):]
-        running_name, wait_target = _parse_artifact(
+        running_name, wait_targets = _parse_artifact(
             path, _line_number(artifact_index), status, artifact_value, problems,
             process_chain, notices,
         )
@@ -389,7 +394,7 @@ def _parse_contract(path, problems, process_chain, notices):
             source_line=_line_number(source_index),
             artifact_line=_line_number(artifact_index),
             source_ids=source_ids,
-            wait_target=wait_target,
+            wait_targets=wait_targets,
             running_name=running_name,
         )
         index = artifact_index + 1
@@ -491,22 +496,23 @@ def _check_original_quotes(contract, problems, session_tasks, ledger_ids):
 
 
 def _check_wait_targets(contracts, problems):
-    # D4：等：Tn 必须指向同一 session 中仍留在清单的条目。
+    # D4：等：列出的每个 Tn 都必须指向同一 session 中仍留在清单的条目。
     tasks_by_session = {}
     for contract in contracts:
         tasks_by_session.setdefault(contract.session, set()).update(contract.tasks)
     for contract in contracts:
         open_tasks = tasks_by_session.get(contract.session, set())
         for task in contract.tasks.values():
-            if task.wait_target and task.wait_target not in open_tasks:
-                problems.append(Problem(
-                    contract.path, task.artifact_line,
-                    f"等：{task.wait_target} 指向不在清单中的条目（可能已关闭或不存在）",
-                ))
+            for target in task.wait_targets:
+                if target not in open_tasks:
+                    problems.append(Problem(
+                        contract.path, task.artifact_line,
+                        f"等：{target} 指向不在清单中的条目（可能已关闭或不存在）",
+                    ))
 
 
 def _check_wait_cycles(contracts, problems):
-    # D4：等待关系必须无环；环上的每个条目都会出现在链路提示中。
+    # D4：等待图的所有目标都是边；用强连通分量报告所有环上条目。
     tasks_by_session = {}
     for contract in contracts:
         session_tasks = tasks_by_session.setdefault(contract.session, {})
@@ -520,30 +526,80 @@ def _check_wait_cycles(contracts, problems):
             for task_id, matches in session_tasks.items()
             if len(matches) == 1
         }
-        finished = set()
-        for start_id in unique_tasks:
-            if start_id in finished:
-                continue
-            chain = []
-            chain_positions = {}
-            task_id = start_id
-            while task_id in unique_tasks and task_id not in finished:
-                if task_id in chain_positions:
-                    cycle = chain[chain_positions[task_id]:]
-                    contract, task = unique_tasks[cycle[0]]
-                    description = " → ".join((*cycle, cycle[0]))
-                    problems.append(Problem(
-                        contract.path, task.artifact_line,
-                        f"等待链成环：{description}",
-                    ))
-                    break
-                chain_positions[task_id] = len(chain)
-                chain.append(task_id)
-                task = unique_tasks[task_id][1]
-                if not task.wait_target:
-                    break
-                task_id = task.wait_target
-            finished.update(chain)
+        graph = {
+            task_id: [target for target in task.wait_targets if target in unique_tasks]
+            for task_id, (_, task) in unique_tasks.items()
+        }
+        next_index = 0
+        indices = {}
+        lowlinks = {}
+        stack = []
+        on_stack = set()
+        components = []
+
+        def visit(task_id):
+            nonlocal next_index
+            indices[task_id] = next_index
+            lowlinks[task_id] = next_index
+            next_index += 1
+            stack.append(task_id)
+            on_stack.add(task_id)
+
+            for target in graph[task_id]:
+                if target not in indices:
+                    visit(target)
+                    lowlinks[task_id] = min(lowlinks[task_id], lowlinks[target])
+                elif target in on_stack:
+                    lowlinks[task_id] = min(lowlinks[task_id], indices[target])
+
+            if lowlinks[task_id] == indices[task_id]:
+                component = set()
+                while True:
+                    member = stack.pop()
+                    on_stack.remove(member)
+                    component.add(member)
+                    if member == task_id:
+                        break
+                components.append(component)
+
+        for task_id in graph:
+            if task_id not in indices:
+                visit(task_id)
+
+        for component in components:
+            if len(component) == 1:
+                only_task = next(iter(component))
+                if only_task not in graph[only_task]:
+                    continue
+
+            start_id = next(task_id for task_id in graph if task_id in component)
+            contract, task = unique_tasks[start_id]
+            cycle_path = [start_id]
+            visited = {start_id}
+
+            def find_cycle(task_id):
+                for target in graph[task_id]:
+                    if target not in component:
+                        continue
+                    if target == start_id:
+                        cycle_path.append(start_id)
+                        return True
+                    if target in visited:
+                        continue
+                    visited.add(target)
+                    cycle_path.append(target)
+                    if find_cycle(target):
+                        return True
+                    cycle_path.pop()
+                return False
+
+            find_cycle(start_id)
+            cycle_description = " → ".join(cycle_path)
+            cycle_members = "、".join(sorted(component))
+            problems.append(Problem(
+                contract.path, task.artifact_line,
+                f"等待链成环：{cycle_description}；环上条目：{cycle_members}",
+            ))
 
 
 def _check_ledger(path, problems):
